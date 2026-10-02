@@ -1,183 +1,266 @@
 import datetime
-import requests
-import pandas as pd
-import numpy as np
+from datetime import timedelta
 import joblib
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import requests
 import streamlit as st
-import matplotlib.pyplot as plt
 
+# ==========================================
+# CẤU HÌNH GIAO DIỆN STREAMLIT
+# ==========================================
 st.set_page_config(
-    page_title="Hệ thống Hỗ trợ Quyết định Tưới tiêu - TP. Thủ Đức",
-    page_icon="🌱",
-    layout="wide"
+    page_title="DSS Tưới tiêu thông minh - TP. Thủ Đức", page_icon="🌱", layout="wide"
 )
 
-LAT, LON = 10.8494, 106.7537
-MODEL_FILE = "rf_et0_gee.pkl"
-DATA_FILE = "clean_dataset.csv"
-FEATURES = ["temp_max", "temp_min", "temp_mean", "humidity_mean", "radiation_sum", "precipitation_sum", "month", "is_rainy_season"]
+st.markdown(
+    """
+    <h2 style='color: #2e7d32;'>🌱 Dashboard Hỗ trợ Quyết định Tưới tiêu - TP. Thủ Đức</h2>
+    <p style='color: gray;'>Dữ liệu tự động cập nhật thời gian thực từ Open-Meteo API & Mô hình Machine Learning dự báo $ET_0$</p>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown("---")
 
-# --- 1. TẢI DỮ LIỆU LỊCH SỬ VÀ MÔ HÌNH ---
-@st.cache_data
-def load_historical_data():
-    try:
-        df = pd.read_csv(DATA_FILE)
-        df["date"] = pd.to_datetime(df["date"])
-        return df
-    except Exception:
-        return None
-
+# ==========================================
+# LOAD MÔ HÌNH MACHINE LEARNING
+# ==========================================
 @st.cache_resource
-def load_ml_model(df_hist):
-    try:
-        return joblib.load(MODEL_FILE)
-    except Exception:
-        if df_hist is not None:
-            from sklearn.ensemble import RandomForestRegressor
-            X = df_hist[FEATURES]
-            y = df_hist["et0_gee"]
-            model = RandomForestRegressor(n_estimators=50, random_state=42)
-            model.fit(X, y)
-            return model
-        return None
-
-# --- 2. CẬP NHẬT THỜI TIẾT THỜI GIAN THỰC TỚI HÔM NAY ---
-@st.cache_data(ttl=3600)
-def fetch_realtime_weather():
-    today = datetime.date.today()
-    start_date = today - datetime.timedelta(days=9) # Lấy 10 ngày gần nhất
-    
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": LAT,
-        "longitude": LON,
-        "start_date": start_date.strftime("%Y-%m-%d"),
-        "end_date": today.strftime("%Y-%m-%d"),
-        "daily": [
-            "temperature_2m_max",
-            "temperature_2m_min",
-            "temperature_2m_mean",
-            "relative_humidity_2m_mean",
-            "precipitation_sum",
-            "precipitation_probability_max",
-            "shortwave_radiation_sum",
-        ],
-        "timezone": "Asia/Bangkok",
-    }
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code == 200:
-            data = res.json()["daily"]
-            df_recent = pd.DataFrame({
-                "date": pd.to_datetime(data["time"]),
-                "temp_max": data["temperature_2m_max"],
-                "temp_min": data["temperature_2m_min"],
-                "temp_mean": data["temperature_2m_mean"],
-                "humidity_mean": data["relative_humidity_2m_mean"],
-                "precipitation_sum": data["precipitation_sum"],
-                "pop_max": data["precipitation_probability_max"],
-                "radiation_sum": data["shortwave_radiation_sum"]
-            })
-            df_recent["month"] = df_recent["date"].dt.month
-            df_recent["is_rainy_season"] = df_recent["month"].apply(lambda x: 1 if 5 <= x <= 11 else 0)
-            return df_recent
-    except Exception as e:
-        st.error(f"Không thể kết nối API Open-Meteo: {e}")
+def load_ml_model():
+  try:
+    return joblib.load("rf_et0_thuduc_model.pkl")
+  except Exception as e:
+    st.error(
+        f"Không tìm thấy file mô hình 'rf_et0_thuduc_model.pkl'. Hãy chạy script"
+        f" train trước! Lỗi: {e}"
+    )
     return None
 
-# --- GIAO DIỆN WEB DASHBOARD ---
-st.title("🌱 Dashboard Hỗ trợ Quyết định Tưới tiêu - TP. Thủ Đức")
-st.caption("Dữ liệu tự động cập nhật thời gian thực từ Open-Meteo API & Mô hình Machine Learning dự báo ET₀")
 
-df_hist = load_historical_data()
-model = load_ml_model(df_hist)
-df_recent = fetch_realtime_weather()
+model = load_ml_model()
 
-# Hiển thị thông số thời tiết hôm nay
-if df_recent is not None and not df_recent.empty:
-    today_data = df_recent.iloc[-1]
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("🌧️ Phần trăm mưa dự báo", f"{today_data['pop_max']} %")
-    col2.metric("💧 Lượng mưa dự báo", f"{today_data['precipitation_sum']} mm")
-    col3.metric("🌡️ Nhiệt độ trung bình", f"{today_data['temp_mean']} °C")
-    col4.metric("☀️ Bức xạ mặt trời", f"{today_data['radiation_sum']} MJ/m²")
+# Tọa độ TP. Thủ Đức
+LATITUDE = 10.8494
+LONGITUDE = 106.7537
+
+# ==========================================
+# HÀM THU THẬP DỮ LIỆU THỜI GIAN THỰC (API)
+# ==========================================
+@st.cache_data(ttl=3600)  # Cache dữ liệu trong 1 giờ để tránh gọi API liên tục
+def fetch_live_weather_data():
+  # 1. Lấy dữ liệu lịch sử từ 2015 đến hôm qua
+  end_archive = (datetime.date.today() - timedelta(days=1)).strftime(
+      "%Y-%m-%d"
+  )
+  archive_url = "https://archive-api.open-meteo.com/v1/archive"
+  params_archive = {
+      "latitude": LATITUDE,
+      "longitude": LONGITUDE,
+      "start_date": "2015-01-01",
+      "end_date": end_archive,
+      "daily": [
+          "temperature_2m_max",
+          "temperature_2m_min",
+          "temperature_2m_mean",
+          "relative_humidity_2m_mean",
+          "shortwave_radiation_sum",
+          "precipitation_sum",
+          "wind_speed_10m_max",
+          "et0_fao_evapotranspiration",
+      ],
+      "timezone": "Asia/Bangkok",
+  }
+
+  res_arc = requests.get(archive_url, params=params_archive).json()
+  df_arc = pd.DataFrame(res_arc["daily"])
+  df_arc["date"] = pd.to_datetime(df_arc["date"])
+
+  df_arc = df_arc.rename(
+      columns={
+          "temperature_2m_max": "temp_max",
+          "temperature_2m_min": "temp_min",
+          "temperature_2m_mean": "temp_mean",
+          "relative_humidity_2m_mean": "humidity_mean",
+          "shortwave_radiation_sum": "radiation_sum",
+          "precipitation_sum": "precipitation_sum",
+          "wind_speed_10m_max": "wind_speed_max",
+          "et0_fao_evapotranspiration": "et0_actual",
+      }
+  )
+
+  # 2. Lấy dữ liệu dự báo (Forecast) cho hôm nay và vài ngày tới
+  forecast_url = "https://api.open-meteo.com/v1/forecast"
+  params_fc = {
+      "latitude": LATITUDE,
+      "longitude": LONGITUDE,
+      "daily": [
+          "temperature_2m_max",
+          "temperature_2m_min",
+          "temperature_2m_mean",
+          "relative_humidity_2m_mean",
+          "shortwave_radiation_sum",
+          "precipitation_sum",
+          "wind_speed_10m_max",
+      ],
+      "timezone": "Asia/Bangkok",
+      "forecast_days": 3,
+  }
+
+  res_fc = requests.get(forecast_url, params=params_fc).json()
+  df_fc = pd.DataFrame(res_fc["daily"])
+  df_fc["date"] = pd.to_datetime(df_fc["date"])
+  df_fc = df_fc.rename(
+      columns={
+          "temperature_2m_max": "temp_max",
+          "temperature_2m_min": "temp_min",
+          "temperature_2m_mean": "temp_mean",
+          "relative_humidity_2m_mean": "humidity_mean",
+          "shortwave_radiation_sum": "radiation_sum",
+          "precipitation_sum": "precipitation_sum",
+          "wind_speed_10m_max": "wind_speed_max",
+      }
+  )
+  # Ngày dự báo chưa có ET0 thực tế từ archive
+  df_fc["et0_actual"] = np.nan
+
+  # Gộp dữ liệu lịch sử và dự báo
+  df_full = (
+      pd.concat([df_arc, df_fc])
+      .drop_duplicates(subset=["date"])
+      .sort_values("date")
+      .reset_index(drop=True)
+  )
+
+  # Làm sạch khuyết thiếu bằng nội suy
+  df_full = df_full.interpolate(method="linear").bfill().ffill()
+
+  # Dự báo ET0 bằng mô hình Machine Learning cho toàn bộ chuỗi
+  if model is not None:
+    features = [
+        "temp_max",
+        "temp_min",
+        "temp_mean",
+        "humidity_mean",
+        "radiation_sum",
+        "precipitation_sum",
+        "wind_speed_10m_max",
+    ]
+    df_full["et0_ml"] = model.predict(df_full[features])
+  else:
+    df_full["et0_ml"] = df_full["et0_actual"]
+
+  return df_full
+
+
+# Tải dữ liệu
+# Tải dữ liệu
+df_data = fetch_live_weather_data()
+
+# Lấy thông tin ngày gần nhất để hiển thị các chỉ số trên cùng (Metrics)
+latest_row = df_data.iloc[-1]
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Nhiệt độ trung bình", f"{latest_row['temp_mean']:.1f} °C")
+col2.metric("Độ ẩm trung bình", f"{latest_row['humidity_mean']:.1f} %")
+col3.metric(
+    "Lượng mưa (Hôm nay/Dự báo)", f"{latest_row['precipitation_sum']:.1f} mm"
+)
+col4.metric("Bức xạ mặt trời", f"{latest_row['radiation_sum']:.2f} MJ/m²")
 
 st.markdown("---")
 
-col_left, col_right = st.columns([1, 1.2])
+# ==========================================
+# BỐ CỤC GIAO DIỆN CHÍNH (2 CỘT)
+# ==========================================
+left_col, right_col = st.columns([1, 1.4])
 
-# Phần đề xuất tưới nước
-with col_left:
-    st.subheader("🤖 Dự báo ET₀ ML & Lượng nước tưới")
-    kc = st.slider("Hệ số cây trồng (Kc):", 0.4, 1.3, 1.0, 0.05)
-    
-    if df_recent is not None and model is not None:
-        today_data = df_recent.iloc[-1]
-        input_data = pd.DataFrame([today_data[FEATURES]])
-        
-        et0_pred = model.predict(input_data)[0]
-        etc = et0_pred * kc
-        rain_eff = today_data["precipitation_sum"] * 0.8
-        i_rec = max(0.0, etc - rain_eff)
-        
-        st.success(f"**ET₀ Dự báo ML hôm nay:** {et0_pred:.2f} mm/ngày")
-        st.info(f"**Nhu cầu nước cây trồng (ETc):** {etc:.2f} mm/ngày")
-        
-        if i_rec > 0:
-            st.warning(f"💧 **CẦN TƯỚI BÙ:** {i_rec:.2f} mm/ngày (Tương đương {i_rec*10:.1f} m³/ha)")
-        else:
-            st.success("🌧️ **KHÔNG CẦN TƯỚI:** Lượng mưa hôm nay đã đáp ứng đủ nhu cầu nước!")
+# --- CỘT TRÁI: HỆ THỐNG HỖ TRỢ QUYẾT ĐỊNH (DSS) ---
+with left_col:
+  st.subheader("💧 Dự báo $ET_0$ ML & Lượng nước tưới")
+  kc = st.slider("Hệ số cây trồng ($K_c$):", 0.4, 1.3, 1.0, 0.05)
 
-# Phần biểu đồ so sánh ET₀ thực tế vs Dự báo với 3 mức thời gian
-with col_right:
-    st.subheader("📈 So sánh ET₀ GEE vs ET₀ ML")
-    
-    if df_hist is not None and model is not None:
-        scale_option = st.radio(
-            "Độ chia thời gian:",
-            ["10 Ngày gần nhất", "1 Năm (12 Tháng)", "Tối đa (Toàn bộ lịch sử)"],
-            horizontal=True
-        )
-        
-        fig, ax = plt.subplots(figsize=(8, 4))
-        
-        df_plot = df_hist.copy()
-        df_plot["et0_ml"] = model.predict(df_plot[FEATURES])
-        
-        if scale_option == "10 Ngày gần nhất":
-            if df_recent is not None:
-                df_rec_plot = df_recent.copy()
-                df_rec_plot["et0_ml"] = model.predict(df_rec_plot[FEATURES])
-                
-                # Kết hợp dữ liệu lịch sử et0_gee với 10 ngày gần nhất
-                # Gán et0_gee bằng giá trị lịch sử gần nhất nếu chưa có
-                df_rec_plot["et0_gee"] = df_plot["et0_gee"].iloc[-1] 
-                
-                x_dates = df_rec_plot["date"].dt.strftime('%m-%d')
-                ax.plot(x_dates, df_rec_plot["et0_gee"], marker='o', label="ET0 Thực tế (GEE)", color="green")
-                ax.plot(x_dates, df_rec_plot["et0_ml"], marker='x', linestyle="--", label="ET0 Dự báo (ML)", color="orange")
-                ax.set_xlabel("Ngày (Tháng-Ngày)")
-            
-        elif scale_option == "1 Năm (12 Tháng)":
-            available_years = sorted(df_plot["date"].dt.year.unique(), reverse=True)
-            selected_year = st.selectbox("Chọn năm hiển thị:", available_years)
-            
-            df_year = df_plot[df_plot["date"].dt.year == selected_year]
-            df_sub = df_year.groupby(df_year["date"].dt.month)[["et0_gee", "et0_ml"]].mean().reset_index()
-            
-            ax.plot(df_sub["date"], df_sub["et0_gee"], marker='o', label="ET0 Thực tế (GEE)", color="green")
-            ax.plot(df_sub["date"], df_sub["et0_ml"], marker='x', linestyle="--", label="ET0 Dự báo (ML)", color="orange")
-            ax.set_xlabel(f"Tháng (Năm {selected_year})")
-            ax.set_xticks(range(1, 13))
-            
-        else:
-            df_sub = df_plot.groupby(df_plot["date"].dt.year)[["et0_gee", "et0_ml"]].mean().reset_index()
-            ax.plot(df_sub["date"], df_sub["et0_gee"], marker='o', label="ET0 Thực tế (GEE)", color="green")
-            ax.plot(df_sub["date"], df_sub["et0_ml"], marker='x', linestyle="--", label="ET0 Dự báo (ML)", color="orange")
-            ax.set_xlabel("Năm")
-            ax.set_xticks(df_sub["date"])
+  et0_today = latest_row["et0_ml"]
+  etc = et0_today * kc
+  peff = latest_row["precipitation_sum"] * 0.7  # Lượng mưa hiệu quả giả định
+  net_water = max(0, etc - peff)
 
-        ax.set_ylabel("ET0 (mm/ngày)")
-        ax.legend()
-        ax.grid(True, linestyle="--", alpha=0.6)
-        st.pyplot(fig)
+  st.info(f"**$ET_0$ Dự báo ML hôm nay:** {et0_today:.2f} mm/ngày")
+  st.success(f"**Nhu cầu nước cây trồng ($ET_c$):** {etc:.2f} mm/ngày")
+
+  if net_water > 0:
+    st.warning(
+        f"⚠️ **CẦN TƯỚI:** Khuyến nghị tưới bù **{net_water:.2f} mm** (tương"
+        f" đương {net_water * 1:.1f} lít/m²)"
+    )
+  else:
+    st.success(
+        "✅ **KHÔNG CẦN TƯỚI:** Lượng mưa hiện tại đã đáp ứng đủ nhu cầu nước!"
+    )
+
+# --- CỘT PHẢI: BIỂU ĐỒ SO SÁNH ---
+with right_col:
+  st.subheader("📊 So sánh $ET_0$ Open-Meteo vs $ET_0$ ML")
+
+  # Tùy chọn độ chia thời gian theo yêu cầu
+  time_option = st.radio(
+      "Độ chia thời gian:",
+      ["10 ngày gần nhất", "12 tháng gần nhất", "10 năm gần nhất"],
+      horizontal=True,
+  )
+
+  # Lọc dữ liệu dựa trên lựa chọn của người dùng
+  today = pd.Timestamp.today().normalize()
+  if time_option == "10 ngày gần nhất":
+    filtered_df = df_data[df_data["date"] >= (today - timedelta(days=9))].copy()
+    # Theo yêu cầu: Ngày dự báo (ngày cuối cùng/ngày thứ 10) chỉ có đường ET0 của ML (ET0 Open-Meteo = NaN)
+    if len(filtered_df) > 0:
+      filtered_df.iloc[-1, filtered_df.columns.get_loc("et0_actual")] = np.nan
+  elif time_option == "12 tháng gần nhất":
+    filtered_df = df_data[
+        df_data["date"] >= (today - timedelta(days=365))
+    ].copy()
+  else:  # 10 năm gần nhất
+    filtered_df = df_data[
+        df_data["date"] >= (today - timedelta(days=365 * 10))
+    ].copy()
+
+  # Vẽ biểu đồ tương tác bằng Plotly
+  fig = go.Figure()
+
+  # Đường ET0 thực tế tải từ Open-Meteo
+  fig.add_trace(
+      go.Scatter(
+          x=filtered_df["date"],
+          y=filtered_df["et0_actual"],
+          mode="lines+markers",
+          name="$ET_0$ Open-Meteo (Thực tế)",
+          line=dict(color="#2e7d32", width=2),
+      )
+  )
+
+  # Đường ET0 dự báo từ mô hình Machine Learning
+  fig.add_trace(
+      go.Scatter(
+          x=filtered_df["date"],
+          y=filtered_df["et0_ml"],
+          mode="lines+markers",
+          name="$ET_0$ Dự báo (ML)",
+          line=dict(color="#ff9800", width=2, dash="dash"),
+      )
+  )
+
+  fig.update_layout(
+      xaxis_title="Thời gian",
+      yaxis_title="$ET_0$ (mm/ngày)",
+      legend=dict(
+          orientation="horizontal",
+          yanchor="bottom",
+          y=1.02,
+          xanchor="right",
+          x=1,
+      ),
+      margin=dict(l=20, r=20, t=30, b=20),
+      height=400,
+  )
+
+  st.plotly_chart(fig, use_container_width=True)

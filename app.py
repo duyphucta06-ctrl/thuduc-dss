@@ -26,132 +26,118 @@ st.markdown("---")
 # ==========================================
 # LOAD MÔ HÌNH MACHINE LEARNING
 # ==========================================
-@st.cache_resource
-def load_ml_model():
-  try:
-    return joblib.load("rf_et0_thuduc_model.pkl")
-  except Exception as e:
-    st.error(
-        f"Không tìm thấy file mô hình 'rf_et0_thuduc_model.pkl'. Hãy chạy script"
-        f" train trước! Lỗi: {e}"
-    )
-    return None
-
-
-model = load_ml_model()
-
-# Tọa độ TP. Thủ Đức
-LATITUDE = 10.8494
-LONGITUDE = 106.7537
-
-# ==========================================
-# HÀM THU THẬP DỮ LIỆU THỜI GIAN THỰC (API)
-# ==========================================
-@st.cache_data(ttl=3600)  # Cache dữ liệu trong 1 giờ để tránh gọi API liên tục
+@st.cache_data(ttl=3600)
 def fetch_live_weather_data():
-  # 1. Lấy dữ liệu lịch sử từ 2015 đến hôm qua
-  end_archive = (datetime.date.today() - timedelta(days=1)).strftime(
-      "%Y-%m-%d"
-  )
-  archive_url = "https://archive-api.open-meteo.com/v1/archive"
-  params_archive = {
-      "latitude": LATITUDE,
-      "longitude": LONGITUDE,
-      "start_date": "2015-01-01",
-      "end_date": end_archive,
-      "daily": [
-          "temperature_2m_max",
-          "temperature_2m_min",
-          "temperature_2m_mean",
-          "relative_humidity_2m_mean",
-          "shortwave_radiation_sum",
+  try:
+    # 1. Lấy dữ liệu lịch sử từ 2015 đến hôm qua
+    end_archive = (datetime.date.today() - timedelta(days=1)).strftime(
+        "%Y-%m-%d"
+    )
+    archive_url = "https://archive-api.open-meteo.com/v1/archive"
+    params_archive = {
+        "latitude": LATITUDE,
+        "longitude": LONGITUDE,
+        "start_date": "2015-01-01",
+        "end_date": end_archive,
+        "daily": [
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "temperature_2m_mean",
+            "relative_humidity_2m_mean",
+            "shortwave_radiation_sum",
+            "precipitation_sum",
+            "windgusts_10m_max",
+            "et0_fao_evapotranspiration",
+        ],
+        "timezone": "Asia/Bangkok",
+    }
+
+    res_arc = requests.get(archive_url, params=params_archive).json()
+    if "daily" not in res_arc:
+      st.error(f"Lỗi phản hồi từ Open-Meteo Archive API: {res_arc}")
+      return pd.DataFrame()
+
+    df_arc = pd.DataFrame(res_arc["daily"])
+    df_arc["date"] = pd.to_datetime(df_arc["time"])
+
+    df_arc = df_arc.rename(
+        columns={
+            "temperature_2m_max": "temp_max",
+            "temperature_2m_min": "temp_min",
+            "temperature_2m_mean": "temp_mean",
+            "relative_humidity_2m_mean": "humidity_mean",
+            "shortwave_radiation_sum": "radiation_sum",
+            "precipitation_sum": "precipitation_sum",
+            "windgusts_10m_max": "wind_speed_10m_max",
+            "et0_fao_evapotranspiration": "et0_actual",
+        }
+    )
+
+    # 2. Lấy dữ liệu dự báo (Forecast)
+    forecast_url = "https://api.open-meteo.com/v1/forecast"
+    params_fc = {
+        "latitude": LATITUDE,
+        "longitude": LONGITUDE,
+        "daily": [
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "temperature_2m_mean",
+            "relative_humidity_2m_mean",
+            "shortwave_radiation_sum",
+            "precipitation_sum",
+            "windgusts_10m_max",
+        ],
+        "timezone": "Asia/Bangkok",
+        "forecast_days": 3,
+    }
+
+    res_fc = requests.get(forecast_url, params=params_fc).json()
+    if "daily" in res_fc:
+      df_fc = pd.DataFrame(res_fc["daily"])
+      df_fc["date"] = pd.to_datetime(df_fc["time"])
+      df_fc = df_fc.rename(
+          columns={
+              "temperature_2m_max": "temp_max",
+              "temperature_2m_min": "temp_min",
+              "temperature_2m_mean": "temp_mean",
+              "relative_humidity_2m_mean": "humidity_mean",
+              "shortwave_radiation_sum": "radiation_sum",
+              "precipitation_sum": "precipitation_sum",
+              "windgusts_10m_max": "wind_speed_10m_max",
+          }
+      )
+      df_fc["et0_actual"] = np.nan
+      df_full = (
+          pd.concat([df_arc, df_fc])
+          .drop_duplicates(subset=["date"])
+          .sort_values("date")
+          .reset_index(drop=True)
+      )
+    else:
+      df_full = df_arc
+
+    # Làm sạch khuyết thiếu
+    df_full = df_full.interpolate(method="linear").bfill().ffill()
+
+    # Dự báo ET0 bằng mô hình Machine Learning
+    if model is not None:
+      features = [
+          "temp_max",
+          "temp_min",
+          "temp_mean",
+          "humidity_mean",
+          "radiation_sum",
           "precipitation_sum",
           "wind_speed_10m_max",
-          "et0_fao_evapotranspiration",
-      ],
-      "timezone": "Asia/Bangkok",
-  }
+      ]
+      df_full["et0_ml"] = model.predict(df_full[features])
+    else:
+      df_full["et0_ml"] = df_full["et0_actual"]
 
-  res_arc = requests.get(archive_url, params=params_archive).json()
-  df_arc = pd.DataFrame(res_arc["daily"])
-  df_arc["date"] = pd.to_datetime(df_arc["date"])
-
-  df_arc = df_arc.rename(
-      columns={
-          "temperature_2m_max": "temp_max",
-          "temperature_2m_min": "temp_min",
-          "temperature_2m_mean": "temp_mean",
-          "relative_humidity_2m_mean": "humidity_mean",
-          "shortwave_radiation_sum": "radiation_sum",
-          "precipitation_sum": "precipitation_sum",
-          "wind_speed_10m_max": "wind_speed_max",
-          "et0_fao_evapotranspiration": "et0_actual",
-      }
-  )
-
-  # 2. Lấy dữ liệu dự báo (Forecast) cho hôm nay và vài ngày tới
-  forecast_url = "https://api.open-meteo.com/v1/forecast"
-  params_fc = {
-      "latitude": LATITUDE,
-      "longitude": LONGITUDE,
-      "daily": [
-          "temperature_2m_max",
-          "temperature_2m_min",
-          "temperature_2m_mean",
-          "relative_humidity_2m_mean",
-          "shortwave_radiation_sum",
-          "precipitation_sum",
-          "wind_speed_10m_max",
-      ],
-      "timezone": "Asia/Bangkok",
-      "forecast_days": 3,
-  }
-
-  res_fc = requests.get(forecast_url, params=params_fc).json()
-  df_fc = pd.DataFrame(res_fc["daily"])
-  df_fc["date"] = pd.to_datetime(df_fc["date"])
-  df_fc = df_fc.rename(
-      columns={
-          "temperature_2m_max": "temp_max",
-          "temperature_2m_min": "temp_min",
-          "temperature_2m_mean": "temp_mean",
-          "relative_humidity_2m_mean": "humidity_mean",
-          "shortwave_radiation_sum": "radiation_sum",
-          "precipitation_sum": "precipitation_sum",
-          "wind_speed_10m_max": "wind_speed_max",
-      }
-  )
-  # Ngày dự báo chưa có ET0 thực tế từ archive
-  df_fc["et0_actual"] = np.nan
-
-  # Gộp dữ liệu lịch sử và dự báo
-  df_full = (
-      pd.concat([df_arc, df_fc])
-      .drop_duplicates(subset=["date"])
-      .sort_values("date")
-      .reset_index(drop=True)
-  )
-
-  # Làm sạch khuyết thiếu bằng nội suy
-  df_full = df_full.interpolate(method="linear").bfill().ffill()
-
-  # Dự báo ET0 bằng mô hình Machine Learning cho toàn bộ chuỗi
-  if model is not None:
-    features = [
-        "temp_max",
-        "temp_min",
-        "temp_mean",
-        "humidity_mean",
-        "radiation_sum",
-        "precipitation_sum",
-        "wind_speed_10m_max",
-    ]
-    df_full["et0_ml"] = model.predict(df_full[features])
-  else:
-    df_full["et0_ml"] = df_full["et0_actual"]
-
-  return df_full
-
+    return df_full
+  except Exception as e:
+    st.error(f"Lỗi khi tải dữ liệu thời tiết: {e}")
+    return pd.DataFrame()
 
 # Tải dữ liệu
 # Tải dữ liệu

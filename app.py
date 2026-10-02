@@ -14,7 +14,7 @@ st.set_page_config(
     page_title="DSS Tưới tiêu thông minh - TP. Thủ Đức", page_icon="🌱", layout="wide"
 )
 
-# Khai báo tọa độ TP. Thủ Đức đặt lên đầu tiên để tránh lỗi scope
+# Khai báo tọa độ TP. Thủ Đức
 LATITUDE = 10.8494
 LONGITUDE = 106.7537
 
@@ -43,6 +43,7 @@ def load_ml_model():
 
 
 model = load_ml_model()
+
 
 # ==========================================
 # HÀM THU THẬP DỮ LIỆU THỜI GIAN THỰC (API)
@@ -137,7 +138,22 @@ def fetch_live_weather_data():
     else:
       df_full = df_arc
 
-    # Làm sạch khuyết thiếu
+    # Ép toàn bộ các cột đặc trưng sang kiểu số (numeric) để tránh lỗi str dtype
+    numeric_cols = [
+        "temp_max",
+        "temp_min",
+        "temp_mean",
+        "humidity_mean",
+        "radiation_sum",
+        "precipitation_sum",
+        "wind_speed_10m_max",
+        "et0_actual",
+    ]
+    for col in numeric_cols:
+      if col in df_full.columns:
+        df_full[col] = pd.to_numeric(df_full[col], errors="coerce")
+
+    # Làm sạch khuyết thiếu bằng nội suy tuyến tính
     df_full = df_full.interpolate(method="linear").bfill().ffill()
 
     # Dự báo ET0 bằng mô hình Machine Learning cho toàn bộ chuỗi
@@ -228,6 +244,7 @@ else:
       filtered_df = df_data[
           df_data["date"] >= (today - timedelta(days=9))
       ].copy()
+      # Ngày dự báo (ngày cuối cùng) chỉ có đường ET0 của ML (ET0 Open-Meteo = NaN)
       if len(filtered_df) > 0:
         filtered_df.iloc[-1, filtered_df.columns.get_loc("et0_actual")] = np.nan
     elif time_option == "12 tháng gần nhất":
